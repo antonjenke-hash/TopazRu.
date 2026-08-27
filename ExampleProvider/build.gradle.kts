@@ -9,7 +9,7 @@ version = 1
 cloudstream {
     // All of these properties are optional, you can safely remove any of them.
 
-    description = "Authorized TopasNew24 provider"
+    description = "TopasNew24 Cloudstream Provider"
     authors = listOf("antonjenke-hash")
 
     /**
