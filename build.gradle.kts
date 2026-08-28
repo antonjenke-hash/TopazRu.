@@ -1,91 +1,145 @@
-import com.android.build.gradle.BaseExtension
-import com.lagradost.cloudstream3.gradle.CloudstreamExtension
-import org.jetbrains.kotlin.gradle.dsl.JvmTarget
-import org.jetbrains.kotlin.gradle.tasks.KotlinJvmCompile
+package com.example
 
-buildscript {
-    repositories {
-        google()
-        mavenCentral()
-        // Shitpack repo which contains our tools and dependencies
-        maven("https://jitpack.io")
-    }
+import com.lagradost.cloudstream3.LoadResponse
+import com.lagradost.cloudstream3.MainAPI
+import com.lagradost.cloudstream3.SearchResponse
+import com.lagradost.cloudstream3.TvType
+import com.lagradost.cloudstream3.newMovieLoadResponse
+import com.lagradost.cloudstream3.newMovieSearchResponse
+import org.jsoup.Jsoup
+import java.net.URI
 
-    dependencies {
-        classpath("com.android.tools.build:gradle:8.7.3")
-        // Cloudstream gradle plugin which makes everything work and builds plugins
-        classpath("com.github.recloudstream:gradle:-SNAPSHOT")
-        classpath("org.jetbrains.kotlin:kotlin-gradle-plugin:2.4.0")
-    }
-}
+class ExampleProvider : MainAPI() {
 
-allprojects {
-    repositories {
-        google()
-        mavenCentral()
-        maven("https://jitpack.io")
-    }
-}
+    override var mainUrl = "https://topasnew24.ru/"
 
-fun Project.cloudstream(configuration: CloudstreamExtension.() -> Unit) = extensions.getByName<CloudstreamExtension>("cloudstream").configuration()
+    override var name = "TopasNew24"
 
-fun Project.android(configuration: BaseExtension.() -> Unit) = extensions.getByName<BaseExtension>("android").configuration()
+    override val supportedTypes = setOf(TvType.Movie)
 
-subprojects {
-    apply(plugin = "com.android.library")
-    apply(plugin = "kotlin-android")
-    apply(plugin = "com.lagradost.cloudstream3.gradle")
+    override var lang = "ru"
 
-    cloudstream {
-        // when running through github workflow, GITHUB_REPOSITORY should contain current repository name
-        setRepo(System.getenv("GITHUB_REPOSITORY") ?: "user/repo")
-    }
+    override val hasMainPage = false
 
-    android {
-        namespace = "com.example"
-
-        defaultConfig {
-            minSdk = 21
-            compileSdkVersion(35)
-            targetSdk = 35
+    /**
+     * Wandelt relative Links in absolute URLs um.
+     * Beispiel:
+     * /film/test -> https://topasnew24.ru/film/test
+     */
+    private fun absoluteUrl(link: String): String {
+        return try {
+            URI(mainUrl).resolve(link).toString()
+        } catch (e: Exception) {
+            link
         }
+    }
 
-        compileOptions {
-            sourceCompatibility = JavaVersion.VERSION_1_8
-            targetCompatibility = JavaVersion.VERSION_1_8
-        }
+    override suspend fun search(query: String): List<SearchResponse> {
 
-        tasks.withType<KotlinJvmCompile> {
-            compilerOptions {
-                jvmTarget.set(JvmTarget.JVM_1_8) // Required
-                freeCompilerArgs.addAll(
-                    "-Xno-call-assertions",
-                    "-Xno-param-assertions",
-                    "-Xno-receiver-assertions"
+        val encodedQuery = java.net.URLEncoder.encode(query, "UTF-8")
+
+        val searchUrl = "$mainUrl?s=$encodedQuery"
+
+        val document = Jsoup
+            .connect(searchUrl)
+            .userAgent(
+                "Mozilla/5.0 (Linux; Android 10) " +
+                "AppleWebKit/537.36 (KHTML, like Gecko) " +
+                "Chrome/120.0 Mobile Safari/537.36"
+            )
+            .timeout(15000)
+            .get()
+
+        return document
+            .select("article, .post, .item")
+            .mapNotNull { element ->
+
+                val link = element
+                    .select("a[href]")
+                    .firstOrNull()
+                    ?.attr("href")
+                    ?.trim()
+                    ?: return@mapNotNull null
+
+                val absoluteLink = absoluteUrl(link)
+
+                val title = element
+                    .select(
+                        "h1, h2, h3, " +
+                        ".entry-title, " +
+                        ".post-title, " +
+                        ".title"
+                    )
+                    .firstOrNull()
+                    ?.text()
+                    ?.trim()
+                    ?: element
+                        .select("a[href]")
+                        .firstOrNull()
+                        ?.text()
+                        ?.trim()
+                        ?: absoluteLink
+                            .substringAfterLast("/")
+                            .substringBefore("?")
+                            .replace("-", " ")
+                            .replace("_", " ")
+                            .trim()
+
+                if (title.isBlank()) {
+                    return@mapNotNull null
+                }
+
+                newMovieSearchResponse(
+                    title = title,
+                    url = absoluteLink,
+                    type = TvType.Movie
                 )
             }
+    }
+
+    override suspend fun load(url: String): LoadResponse {
+
+        val document = Jsoup
+            .connect(url)
+            .userAgent(
+                "Mozilla/5.0 (Linux; Android 10) " +
+                "AppleWebKit/537.36 (KHTML, like Gecko) " +
+                "Chrome/120.0 Mobile Safari/537.36"
+            )
+            .timeout(15000)
+            .get()
+
+        val title = document
+            .select("h1")
+            .firstOrNull()
+            ?.text()
+            ?.trim()
+            ?.takeIf { it.isNotBlank() }
+            ?: document
+                .select("title")
+                .firstOrNull()
+                ?.text()
+                ?.trim()
+                ?: "TopasNew24"
+
+        val description = document
+            .select(
+                "article p, " +
+                ".entry-content p, " +
+                ".post-content p, " +
+                ".content p"
+            )
+            .firstOrNull()
+            ?.text()
+            ?.trim()
+
+        return newMovieLoadResponse(
+            name = title,
+            url = url,
+            type = TvType.Movie,
+            dataUrl = url
+        ) {
+            this.plot = description
         }
     }
-
-    dependencies {
-        val cloudstream by configurations
-        val implementation by configurations
-
-        // Stubs for all cloudstream classes
-        cloudstream("com.lagradost:cloudstream3:pre-release")
-
-        // These dependencies can include any of those which are added by the app,
-        // but you don't need to include any of them if you don't need them.
-        // https://github.com/recloudstream/cloudstream/blob/master/app/build.gradle.kts
-        implementation(kotlin("stdlib")) // Adds Standard Kotlin Features
-        implementation("com.github.Blatzar:NiceHttp:0.4.11") // HTTP Lib
-        implementation("org.jsoup:jsoup:1.18.3") // HTML Parser
-        // IMPORTANT: Do not bump Jackson above 2.13.1, as newer versions will
-        // break compatibility on older Android devices.
-        implementation("com.fasterxml.jackson.module:jackson-module-kotlin:2.13.1") // JSON Parser
-    }
-}
-
-task<Delete>("clean") {
-    delete(rootProject.layout.buildDirectory)
 }
